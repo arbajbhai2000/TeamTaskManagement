@@ -1,53 +1,75 @@
 ﻿using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+
 using Application.DTOs.Auth;
 using Application.DTOs.Tasks;
 using Application.DTOs.TeamMembers;
 using Application.DTOs.Teams;
+using Application.DTOs.Users;
+
 using Domain.Enums;
+
+using Infrastructure.Persistence;
+
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace API.Tests
 {
     public class TasksControllerTests
         : IClassFixture<WebApplicationFactory<Program>>
     {
+        private readonly WebApplicationFactory<Program> _factory;
         private readonly HttpClient _client;
 
         public TasksControllerTests(
             WebApplicationFactory<Program> factory)
         {
+            _factory = factory;
+
             _client = factory.CreateClient();
         }
 
         private class TestUser
         {
             public AuthResponse Auth { get; set; } = null!;
+
             public string Email { get; set; } = string.Empty;
         }
 
-        private async Task<TestUser> RegisterUserAsync(
-            UserRole role)
+        // ============================================================
+        // TEST USER HELPERS
+        // ============================================================
+
+        private async Task<TestUser> RegisterUserAsync()
         {
             var email =
-                $"task{Guid.NewGuid()}@example.com";
+                $"taskuser_{Guid.NewGuid():N}@example.com";
 
             var request = new RegisterRequest
             {
-                Name = $"Task Test {Guid.NewGuid()}",
-                Email = email,
-                Password = "Password123!"
+                Name =
+                    $"Task Test User {Guid.NewGuid():N}",
+
+                Email =
+                    email,
+
+                Password =
+                    "Password123!"
             };
 
-            var response = await _client.PostAsJsonAsync(
-                "/api/Auth/register",
-                request);
+            var response =
+                await _client.PostAsJsonAsync(
+                    "/api/Auth/register",
+                    request);
 
             response.EnsureSuccessStatusCode();
 
             var result =
-                await response.Content.ReadFromJsonAsync<AuthResponse>();
+                await response.Content
+                    .ReadFromJsonAsync<AuthResponse>();
 
             Assert.NotNull(result);
 
@@ -58,6 +80,147 @@ namespace API.Tests
             };
         }
 
+        // ============================================================
+        // CREATE TEST ADMIN DIRECTLY IN TEST DATABASE
+        // ============================================================
+        //
+        // Public registration intentionally creates only User.
+        // Therefore we bootstrap an Admin directly in the test DB.
+        //
+        // This does NOT change production behavior.
+        //
+        private async Task<TestUser> CreateTestAdminAsync()
+        {
+            var email =
+                $"testadmin_{Guid.NewGuid():N}@example.com";
+
+            var password =
+                "Admin@12345";
+
+            using var scope =
+                _factory.Services.CreateScope();
+
+            var db =
+                scope.ServiceProvider
+                    .GetRequiredService<ApplicationDbContext>();
+
+            var admin = new Domain.Entities.User
+            {
+                Name =
+                    $"Test Admin {Guid.NewGuid():N}",
+
+                Email =
+                    email,
+
+                PasswordHash =
+                    BCrypt.Net.BCrypt.HashPassword(
+                        password),
+
+                Role =
+                    UserRole.Admin,
+
+                CreatedAt =
+                    DateTime.UtcNow
+            };
+
+            db.Users.Add(admin);
+
+            await db.SaveChangesAsync();
+
+            var loginRequest = new LoginRequest
+            {
+                Email = email,
+                Password = password
+            };
+
+            var response =
+                await _client.PostAsJsonAsync(
+                    "/api/Auth/login",
+                    loginRequest);
+
+            response.EnsureSuccessStatusCode();
+
+            var auth =
+                await response.Content
+                    .ReadFromJsonAsync<AuthResponse>();
+
+            Assert.NotNull(auth);
+
+            return new TestUser
+            {
+                Auth = auth,
+                Email = email
+            };
+        }
+
+        // ============================================================
+        // CREATE USER / MANAGER / ADMIN THROUGH REAL ADMIN API
+        // ============================================================
+
+        private async Task<TestUser> CreateUserAsAdminAsync(
+            string adminToken,
+            UserRole role)
+        {
+            var email =
+                $"task_{role.ToString().ToLower()}_{Guid.NewGuid():N}@example.com";
+
+            SetBearerToken(adminToken);
+
+            var request = new CreateUserRequest
+            {
+                Name =
+                    $"Task {role} {Guid.NewGuid():N}",
+
+                Email =
+                    email,
+
+                Password =
+                    "Password123!",
+
+                Role =
+                    role
+            };
+
+            var response =
+                await _client.PostAsJsonAsync(
+                    "/api/Users",
+                    request);
+
+            Assert.True(
+                response.IsSuccessStatusCode,
+                $"Creating {role} failed with {(int)response.StatusCode} {response.StatusCode}");
+
+            // Login so we get an AuthResponse/JWT for this user.
+            var loginRequest = new LoginRequest
+            {
+                Email = email,
+                Password = "Password123!"
+            };
+
+            var loginResponse =
+                await _client.PostAsJsonAsync(
+                    "/api/Auth/login",
+                    loginRequest);
+
+            loginResponse.EnsureSuccessStatusCode();
+
+            var auth =
+                await loginResponse.Content
+                    .ReadFromJsonAsync<AuthResponse>();
+
+            Assert.NotNull(auth);
+
+            return new TestUser
+            {
+                Auth = auth,
+                Email = email
+            };
+        }
+
+        // ============================================================
+        // AUTH
+        // ============================================================
+
         private void SetBearerToken(string token)
         {
             _client.DefaultRequestHeaders.Authorization =
@@ -66,15 +229,25 @@ namespace API.Tests
                     token);
         }
 
-        private async Task<int> CreateTeamAsync(
-            string accessToken)
+        private void ClearBearerToken()
         {
-            SetBearerToken(accessToken);
+            _client.DefaultRequestHeaders.Authorization = null;
+        }
+
+        // ============================================================
+        // TEAM HELPERS
+        // ============================================================
+
+        private async Task<int> CreateTeamAsync(
+            string adminToken)
+        {
+            SetBearerToken(adminToken);
 
             var request = new CreateTeamRequest
             {
                 Name =
-                    $"Task Test Team {Guid.NewGuid()}",
+                    $"Task Test Team {Guid.NewGuid():N}",
+
                 Description =
                     "Team for task integration test"
             };
@@ -98,20 +271,21 @@ namespace API.Tests
         }
 
         private async Task<int> GetUserIdByEmailAsync(
-            string accessToken,
+            string token,
             string email)
         {
-            SetBearerToken(accessToken);
+            SetBearerToken(token);
 
             var response =
-                await _client.GetAsync("/api/Users");
+                await _client.GetAsync(
+                    "/api/Users");
 
             response.EnsureSuccessStatusCode();
 
             var users =
                 await response.Content
                     .ReadFromJsonAsync<
-                        List<Application.DTOs.Users.UserResponse>>();
+                        List<UserResponse>>();
 
             Assert.NotNull(users);
 
@@ -119,8 +293,7 @@ namespace API.Tests
                 users.FirstOrDefault(
                     x => x.Email == email);
 
-            Assert.NotNull(
-                user);
+            Assert.NotNull(user);
 
             return user.Id;
         }
@@ -148,6 +321,10 @@ namespace API.Tests
                 $"Adding team member failed with {(int)response.StatusCode} {response.StatusCode}");
         }
 
+        // ============================================================
+        // TASK HELPERS
+        // ============================================================
+
         private async Task<int> CreateValidTaskAsync(
             string adminToken,
             int teamId,
@@ -159,15 +336,20 @@ namespace API.Tests
                 new CreateTaskRequest
                 {
                     Title =
-                        $"Test Task {Guid.NewGuid()}",
+                        $"Test Task {Guid.NewGuid():N}",
+
                     Description =
                         "Task created by integration test",
+
                     Priority =
                         TaskPriority.Medium,
+
                     DueDate =
                         DateTime.UtcNow.AddDays(7),
+
                     AssignedToId =
                         userId,
+
                     TeamId =
                         teamId
                 };
@@ -190,12 +372,15 @@ namespace API.Tests
             return task.Id;
         }
 
+        // ============================================================
+        // TESTS
+        // ============================================================
+
         [Fact]
         public async Task GetAll_AuthenticatedUser_ReturnsSuccess()
         {
             var user =
-                await RegisterUserAsync(
-                    UserRole.User);
+                await RegisterUserAsync();
 
             SetBearerToken(
                 user.Auth.AccessToken);
@@ -212,8 +397,7 @@ namespace API.Tests
         [Fact]
         public async Task GetAll_WithoutAuthentication_ReturnsUnauthorized()
         {
-            _client.DefaultRequestHeaders.Authorization =
-                null;
+            ClearBearerToken();
 
             var response =
                 await _client.GetAsync(
@@ -228,8 +412,7 @@ namespace API.Tests
         public async Task GetById_NonExistingTask_ReturnsNotFound()
         {
             var user =
-                await RegisterUserAsync(
-                    UserRole.User);
+                await RegisterUserAsync();
 
             SetBearerToken(
                 user.Auth.AccessToken);
@@ -247,11 +430,11 @@ namespace API.Tests
         public async Task Create_AdminUser_WithValidTeamMember_ReturnsCreated()
         {
             var admin =
-                await RegisterUserAsync(
-                    UserRole.Admin);
+                await CreateTestAdminAsync();
 
             var user =
-                await RegisterUserAsync(
+                await CreateUserAsAdminAsync(
+                    admin.Auth.AccessToken,
                     UserRole.User);
 
             var teamId =
@@ -260,7 +443,7 @@ namespace API.Tests
 
             var userId =
                 await GetUserIdByEmailAsync(
-                    user.Auth.AccessToken,
+                    admin.Auth.AccessToken,
                     user.Email);
 
             await AddUserToTeamAsync(
@@ -282,8 +465,7 @@ namespace API.Tests
         public async Task Create_User_ReturnsForbidden()
         {
             var user =
-                await RegisterUserAsync(
-                    UserRole.User);
+                await RegisterUserAsync();
 
             SetBearerToken(
                 user.Auth.AccessToken);
@@ -293,14 +475,21 @@ namespace API.Tests
                 {
                     Title =
                         "Unauthorized Task",
+
                     Description =
                         "User should not create tasks",
+
                     Priority =
                         TaskPriority.Medium,
+
                     DueDate =
                         DateTime.UtcNow.AddDays(5),
-                    AssignedToId = 1,
-                    TeamId = 1
+
+                    AssignedToId =
+                        1,
+
+                    TeamId =
+                        1
                 };
 
             var response =
@@ -316,17 +505,18 @@ namespace API.Tests
         [Fact]
         public async Task Create_Manager_WithInvalidTeamMember_ReturnsBadRequest()
         {
+            var admin =
+                await CreateTestAdminAsync();
+
             var manager =
-                await RegisterUserAsync(
+                await CreateUserAsAdminAsync(
+                    admin.Auth.AccessToken,
                     UserRole.Manager);
 
             var user =
-                await RegisterUserAsync(
+                await CreateUserAsAdminAsync(
+                    admin.Auth.AccessToken,
                     UserRole.User);
-
-            var admin =
-                await RegisterUserAsync(
-                    UserRole.Admin);
 
             var teamId =
                 await CreateTeamAsync(
@@ -334,7 +524,7 @@ namespace API.Tests
 
             var userId =
                 await GetUserIdByEmailAsync(
-                    user.Auth.AccessToken,
+                    admin.Auth.AccessToken,
                     user.Email);
 
             SetBearerToken(
@@ -345,14 +535,19 @@ namespace API.Tests
                 {
                     Title =
                         "Invalid Assignment Task",
+
                     Description =
                         "User is not a member of this team",
+
                     Priority =
                         TaskPriority.High,
+
                     DueDate =
                         DateTime.UtcNow.AddDays(5),
+
                     AssignedToId =
                         userId,
+
                     TeamId =
                         teamId
                 };
@@ -371,11 +566,11 @@ namespace API.Tests
         public async Task GetById_UserAssignedToTask_ReturnsSuccess()
         {
             var admin =
-                await RegisterUserAsync(
-                    UserRole.Admin);
+                await CreateTestAdminAsync();
 
             var user =
-                await RegisterUserAsync(
+                await CreateUserAsAdminAsync(
+                    admin.Auth.AccessToken,
                     UserRole.User);
 
             var teamId =
@@ -384,7 +579,7 @@ namespace API.Tests
 
             var userId =
                 await GetUserIdByEmailAsync(
-                    user.Auth.AccessToken,
+                    admin.Auth.AccessToken,
                     user.Email);
 
             await AddUserToTeamAsync(
@@ -414,15 +609,16 @@ namespace API.Tests
         public async Task GetById_UserAccessingAnotherUsersTask_ReturnsForbidden()
         {
             var admin =
-                await RegisterUserAsync(
-                    UserRole.Admin);
+                await CreateTestAdminAsync();
 
             var assignedUser =
-                await RegisterUserAsync(
+                await CreateUserAsAdminAsync(
+                    admin.Auth.AccessToken,
                     UserRole.User);
 
             var otherUser =
-                await RegisterUserAsync(
+                await CreateUserAsAdminAsync(
+                    admin.Auth.AccessToken,
                     UserRole.User);
 
             var teamId =
@@ -431,12 +627,12 @@ namespace API.Tests
 
             var assignedUserId =
                 await GetUserIdByEmailAsync(
-                    assignedUser.Auth.AccessToken,
+                    admin.Auth.AccessToken,
                     assignedUser.Email);
 
             var otherUserId =
                 await GetUserIdByEmailAsync(
-                    otherUser.Auth.AccessToken,
+                    admin.Auth.AccessToken,
                     otherUser.Email);
 
             Assert.NotEqual(
@@ -475,8 +671,7 @@ namespace API.Tests
         public async Task Update_NonExistingTask_AdminUser_ReturnsNotFound()
         {
             var admin =
-                await RegisterUserAsync(
-                    UserRole.Admin);
+                await CreateTestAdminAsync();
 
             SetBearerToken(
                 admin.Auth.AccessToken);
@@ -486,16 +681,24 @@ namespace API.Tests
                 {
                     Title =
                         "Updated Task",
+
                     Description =
                         "Updated description",
+
                     Status =
                         TaskItemStatus.InProgress,
+
                     Priority =
                         TaskPriority.High,
+
                     DueDate =
                         DateTime.UtcNow.AddDays(5),
-                    AssignedToId = 1,
-                    TeamId = 1
+
+                    AssignedToId =
+                        1,
+
+                    TeamId =
+                        1
                 };
 
             var response =
@@ -512,8 +715,7 @@ namespace API.Tests
         public async Task Delete_NonExistingTask_AdminUser_ReturnsNotFound()
         {
             var admin =
-                await RegisterUserAsync(
-                    UserRole.Admin);
+                await CreateTestAdminAsync();
 
             SetBearerToken(
                 admin.Auth.AccessToken);
@@ -531,8 +733,7 @@ namespace API.Tests
         public async Task Delete_User_ReturnsForbidden()
         {
             var user =
-                await RegisterUserAsync(
-                    UserRole.User);
+                await RegisterUserAsync();
 
             SetBearerToken(
                 user.Auth.AccessToken);

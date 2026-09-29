@@ -68,7 +68,9 @@ namespace Application.Tests.Services
                 .ReturnsAsync(tasks);
 
             // Act
-            var result = await _dashboardService.GetDashboardAsync(5);
+            var result = await _dashboardService.GetDashboardAsync(
+                5,
+                "User");
 
             // Assert
             Assert.Equal(4, result.TotalTasks);
@@ -126,6 +128,7 @@ namespace Application.Tests.Services
             // Act
             var result = await _dashboardService.GetDashboardAsync(
                 5,
+                "User",
                 status: "ToDo");
 
             // Assert
@@ -180,6 +183,7 @@ namespace Application.Tests.Services
             // Act
             var result = await _dashboardService.GetDashboardAsync(
                 5,
+                "User",
                 priority: "High");
 
             // Assert
@@ -239,6 +243,7 @@ namespace Application.Tests.Services
             // Act
             var result = await _dashboardService.GetDashboardAsync(
                 5,
+                "User",
                 deadline: deadline);
 
             // Assert
@@ -306,7 +311,9 @@ namespace Application.Tests.Services
                 .ReturnsAsync(tasks);
 
             // Act
-            var result = await _dashboardService.GetDashboardAsync(5);
+            var result = await _dashboardService.GetDashboardAsync(
+                5,
+                "User");
 
             // Assert
             Assert.Equal(2, result.OverdueTasks);
@@ -321,7 +328,9 @@ namespace Application.Tests.Services
                 .ReturnsAsync(new List<TaskItem>());
 
             // Act
-            var result = await _dashboardService.GetDashboardAsync(99);
+            var result = await _dashboardService.GetDashboardAsync(
+                99,
+                "User");
 
             // Assert
             Assert.Equal(0, result.TotalTasks);
@@ -370,6 +379,7 @@ namespace Application.Tests.Services
             // Act
             var result = await _dashboardService.GetDashboardAsync(
                 5,
+                "User",
                 status: "InvalidStatus");
 
             // Assert
