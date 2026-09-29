@@ -1,0 +1,49 @@
+services:
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: teamtaskmanagement-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "TeamTask@12345"
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: TeamTaskManagement/Dockerfile
+    container_name: teamtaskmanagement-api
+    depends_on:
+      - sqlserver
+    environment:
+      ASPNETCORE_ENVIRONMENT: "Development"
+      ASPNETCORE_URLS: "http://+:8080"
+
+      ConnectionStrings__DefaultConnection: "Server=sqlserver,1433;Database=TeamTaskManagementDB;User Id=sa;Password=TeamTask@12345;TrustServerCertificate=True"
+
+      Jwt__Key: "TeamTaskManagementSuperSecretKey123456789"
+      Jwt__Issuer: "TeamTaskManagementAPI"
+      Jwt__Audience: "TeamTaskManagementClient"
+      Jwt__AccessTokenExpiryMinutes: "60"
+      Jwt__RefreshTokenExpiryDays: "7"
+    ports:
+      - "5298:8080"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./Frontend/team-task-management-ui
+      dockerfile: Dockerfile
+    container_name: teamtaskmanagement-frontend
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
+    restart: unless-stopped
+
+volumes:
+  sqlserver_data:
